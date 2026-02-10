@@ -599,27 +599,43 @@ class CPUProcessorLogic(ProcessorLogic):
 class GPUProcessorLogic(ProcessorLogic):
     def rescale_i(self, samples, width, height, algorithm: str):
         # samples shape: [B, H, W, C]
-        samples = samples.movedim(-1, 1) # [B, C, H, W]
-        
         mode = algorithm.lower()
-        if mode == 'lanczos' or mode == 'box' or mode == 'hamming':
-            mode = 'bicubic' # Fallback for now as torch doesn't support these directly in interpolate
         
-        samples = TF.interpolate(samples, size=(height, width), mode=mode, align_corners=False if mode not in ['nearest', 'area'] else None)
+        # CPU works better, fallback to CPU for rescaling
+        original_device = samples.device
+        samples = samples.movedim(-1, 1)  # [B, C, H, W]
+        algorithm_enum = getattr(Image, algorithm.upper())
+        results = []
+        for i in range(samples.shape[0]):
+            samples_pil: Image.Image = F.to_pil_image(samples[i].float().cpu()).resize((width, height), algorithm_enum)
+            results.append(F.to_tensor(samples_pil))
+        samples = torch.stack(results, dim=0).to(original_device)
         samples = samples.movedim(1, -1)
         return samples
+        
+        #samples = samples.movedim(-1, 1)  # [B, C, H, W]
+        #samples = TF.interpolate(samples, size=(height, width), mode=mode, align_corners=False if mode not in ['nearest', 'area'] else None)
+        #samples = samples.movedim(1, -1)
+        #return samples
 
     def rescale_m(self, samples, width, height, algorithm: str):
-        # samples shape: [B, H, W] -> needs [B, C, H, W] for interpolate
-        samples = samples.unsqueeze(1)
-        
+        # samples shape: [B, H, W]
         mode = algorithm.lower()
-        if mode == 'lanczos' or mode == 'box' or mode == 'hamming':
-            mode = 'bicubic' # Fallback
-            
-        samples = TF.interpolate(samples, size=(height, width), mode=mode, align_corners=False if mode not in ['nearest', 'area'] else None)
-        samples = samples.squeeze(1)
+        
+        # CPU works better, fallback to CPU for rescaling
+        original_device = samples.device
+        algorithm_enum = getattr(Image, algorithm.upper())
+        results = []
+        for i in range(samples.shape[0]):
+            samples_pil: Image.Image = F.to_pil_image(samples[i].float().cpu()).resize((width, height), algorithm_enum)
+            results.append(F.to_tensor(samples_pil).squeeze(0))
+        samples = torch.stack(results, dim=0).to(original_device)
         return samples
+        
+        #samples = samples.unsqueeze(1)  # [B, H, W] -> [B, 1, H, W]
+        #samples = TF.interpolate(samples, size=(height, width), mode=mode, align_corners=False if mode not in ['nearest', 'area'] else None)
+        #samples = samples.squeeze(1)
+        #return samples
 
     def fillholes_iterative_hipass_fill_m(self, samples):
         # samples shape: [B, H, W]
