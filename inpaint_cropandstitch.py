@@ -1215,7 +1215,9 @@ class InpaintCropImproved:
                 "output_target_width": ("INT", {"default": 512, "min": 64, "max": nodes.MAX_RESOLUTION, "step": 1}),
                 "output_target_height": ("INT", {"default": 512, "min": 64, "max": nodes.MAX_RESOLUTION, "step": 1}),
                 "output_padding": (["0", "8", "16", "32", "64", "128", "256", "512"], {"default": "32"}),
-                
+                "pad_to_max_size": ("BOOLEAN", {"default": False, "tooltip": "When processing multiple masks: if output_resize_to_target_size is False, pads crops to the largest natural size. If output_resize_to_target_size is True, resizes each crop to fit within target (preserving aspect ratio) then pads to exact target dimensions. Use with Stitch node's accumulate option."}),
+                "uniform_scale": ("BOOLEAN", {"default": False, "tooltip": "When enabled with pad_to_max_size and output_resize_to_target_size: applies the same scale factor to all crops (based on the largest crop). This ensures consistent detail levels across all inpainted regions. Without this, each crop is independently scaled to maximize its resolution."}),
+
                 # Device Mode
                 "device_mode": (["cpu (compatible)", "gpu (much faster)"], {"default": "gpu (much faster)"}),
            },
@@ -1293,7 +1295,7 @@ class InpaintCropImproved:
     )
     #'''
  
-    def inpaint_crop(self, image, downscale_algorithm, upscale_algorithm, preresize, preresize_mode, preresize_min_width, preresize_min_height, preresize_max_width, preresize_max_height, extend_for_outpainting, extend_up_factor, extend_down_factor, extend_left_factor, extend_right_factor, mask_hipass_filter, mask_fill_holes, mask_expand_pixels, mask_invert, mask_blend_pixels, context_from_mask_extend_factor, output_resize_to_target_size, output_target_width, output_target_height, output_padding, device_mode, mask=None, optional_context_mask=None):
+    def inpaint_crop(self, image, downscale_algorithm, upscale_algorithm, preresize, preresize_mode, preresize_min_width, preresize_min_height, preresize_max_width, preresize_max_height, extend_for_outpainting, extend_up_factor, extend_down_factor, extend_left_factor, extend_right_factor, mask_hipass_filter, mask_fill_holes, mask_expand_pixels, mask_invert, mask_blend_pixels, context_from_mask_extend_factor, output_resize_to_target_size, output_target_width, output_target_height, output_padding, pad_to_max_size, uniform_scale, device_mode, mask=None, optional_context_mask=None):
         image = image.clone()
         if mask is not None:
             mask = mask.clone()
@@ -1325,7 +1327,7 @@ class InpaintCropImproved:
                 print(optional_context_mask.shape, type(optional_context_mask), optional_context_mask.dtype)
 
         if image.shape[0] > 1:
-            assert output_resize_to_target_size, "output_resize_to_target_size must be enabled when input is a batch of images, given all images in the batch output have to be the same size"
+            assert output_resize_to_target_size or pad_to_max_size, "output_resize_to_target_size or pad_to_max_size must be enabled when input is a batch of images, given all images in the batch output have to be the same size"
 
         # When a LoadImage node passes a mask without user editing, it may be the wrong shape.
         # Detect and fix that to avoid shape mismatch errors.
@@ -1459,8 +1461,10 @@ class InpaintCropImproved:
 
             # Crop logic
             cur_x, cur_y, cur_w, cur_h = bx[0].item(), by[0].item(), bw[0].item(), bh[0].item()
-            
-            if output_resize_to_target_size:
+
+            # When both pad_to_max_size and output_resize_to_target_size are enabled,
+            # get natural-size crops first, then resize+pad later to preserve aspect ratios
+            if output_resize_to_target_size and not pad_to_max_size:
                 canvas_image, cto_x, cto_y, cto_w, cto_h, cropped_image, cropped_mask, ctc_x, ctc_y, ctc_w, ctc_h = processor.crop_magic_im(
                     sub_image, sub_mask, cur_x, cur_y, cur_w, cur_h, output_target_width, output_target_height, output_padding, downscale_algorithm, upscale_algorithm, resize_output=True
                 )
@@ -1549,6 +1553,121 @@ class InpaintCropImproved:
                 debug_outputs["DEBUG_cropped_mask_blend"].append(p_mask_blend.squeeze(0).cpu())
 
         # Final stacking on CPU
+        # Handle pad_to_max_size: either pad to max natural size, or resize+pad to target size
+        if pad_to_max_size and len(result_image) > 1:
+            # Determine target dimensions
+            if output_resize_to_target_size:
+                # Resize each crop to fit within target, then pad to exact target
+                target_h = output_target_height
+                target_w = output_target_width
+            else:
+                # Pad to max natural size
+                target_h = max(img.shape[0] for img in result_image)
+                target_w = max(img.shape[1] for img in result_image)
+
+            # Calculate uniform scale factor if enabled
+            # This ensures all crops have consistent detail levels
+            uniform_scale_factor = None
+            if uniform_scale and output_resize_to_target_size:
+                # Find the largest crop dimensions
+                max_crop_h = max(img.shape[0] for img in result_image)
+                max_crop_w = max(img.shape[1] for img in result_image)
+                # Calculate scale factor to fit the largest crop within target
+                uniform_scale_factor = min(target_w / max_crop_w, target_h / max_crop_h)
+
+            # Initialize padding info lists in stitcher
+            result_stitcher['pad_to_max_size'] = True
+            result_stitcher['original_crop_h'] = []
+            result_stitcher['original_crop_w'] = []
+            result_stitcher['padded_crop_h'] = target_h
+            result_stitcher['padded_crop_w'] = target_w
+
+            padded_images = []
+            padded_masks = []
+
+            for i, (img, msk) in enumerate(zip(result_image, result_mask)):
+                orig_h, orig_w = img.shape[0], img.shape[1]
+                blend_msk = result_stitcher['cropped_mask_for_blend'][i]  # (1, H, W)
+
+                # If output_resize_to_target_size is enabled, resize crops
+                if output_resize_to_target_size:
+                    if uniform_scale_factor is not None:
+                        # Uniform scale: apply same scale factor to all crops
+                        scale = uniform_scale_factor
+                    else:
+                        # Per-crop scale: each crop independently scaled to fit target
+                        scale = min(target_w / orig_w, target_h / orig_h)
+
+                    new_w = int(orig_w * scale)
+                    new_h = int(orig_h * scale)
+
+                    # Ensure dimensions are at least 1 and don't exceed target
+                    new_w = max(1, min(new_w, target_w))
+                    new_h = max(1, min(new_h, target_h))
+
+                    # Resize image and masks
+                    img_tensor = img.unsqueeze(0)  # (1, H, W, C)
+                    msk_tensor = msk.unsqueeze(0)  # (1, H, W)
+                    blend_tensor = blend_msk  # (1, H, W)
+
+                    if new_w < orig_w or new_h < orig_h:  # Downscaling
+                        img_tensor = processor.rescale_i(img_tensor, new_w, new_h, downscale_algorithm)
+                        msk_tensor = processor.rescale_m(msk_tensor, new_w, new_h, downscale_algorithm)
+                        blend_tensor = processor.rescale_m(blend_tensor, new_w, new_h, downscale_algorithm)
+                    else:  # Upscaling
+                        img_tensor = processor.rescale_i(img_tensor, new_w, new_h, upscale_algorithm)
+                        msk_tensor = processor.rescale_m(msk_tensor, new_w, new_h, upscale_algorithm)
+                        blend_tensor = processor.rescale_m(blend_tensor, new_w, new_h, upscale_algorithm)
+
+                    img = img_tensor.squeeze(0).cpu()
+                    msk = msk_tensor.squeeze(0).cpu()
+                    blend_msk = blend_tensor.cpu()
+                    orig_h, orig_w = img.shape[0], img.shape[1]
+
+                # Store the size after resize (before padding) for stitching
+                result_stitcher['original_crop_h'].append(orig_h)
+                result_stitcher['original_crop_w'].append(orig_w)
+
+                # Pad to target dimensions
+                pad_h = target_h - orig_h
+                pad_w = target_w - orig_w
+
+                if pad_h > 0 or pad_w > 0:
+                    # Pad with edge values (replicate padding extends edge pixels)
+                    padded_img = torch.nn.functional.pad(
+                        img.permute(2, 0, 1).unsqueeze(0),  # (1, C, H, W)
+                        (0, pad_w, 0, pad_h),  # (left, right, top, bottom)
+                        mode='replicate'
+                    ).squeeze(0).permute(1, 2, 0)  # Back to (H, W, C)
+
+                    # Mask is (H, W), pad with zeros (unmasked area)
+                    padded_msk = torch.nn.functional.pad(
+                        msk.unsqueeze(0).unsqueeze(0),  # (1, 1, H, W)
+                        (0, pad_w, 0, pad_h),
+                        mode='constant',
+                        value=0
+                    ).squeeze(0).squeeze(0)  # Back to (H, W)
+
+                    # Pad the blend mask
+                    padded_blend = torch.nn.functional.pad(
+                        blend_msk.unsqueeze(0),  # (1, 1, H, W)
+                        (0, pad_w, 0, pad_h),
+                        mode='constant',
+                        value=0
+                    ).squeeze(0)  # Back to (1, H, W)
+                    result_stitcher['cropped_mask_for_blend'][i] = padded_blend
+                else:
+                    padded_img = img
+                    padded_msk = msk
+
+                padded_images.append(padded_img)
+                padded_masks.append(padded_msk)
+
+            result_image = padded_images
+            result_mask = padded_masks
+        else:
+            result_stitcher['pad_to_max_size'] = False
+
         result_image = torch.stack(result_image, dim=0)
         result_mask = torch.stack(result_mask, dim=0)
 
@@ -1597,6 +1716,7 @@ class InpaintStitchImproved:
             },
             "optional": {
                 "accumulate": ("BOOLEAN", {"default": False, "tooltip": "When enabled, all inpainted regions are combined into a single output image. Use this when you have multiple masks for different regions of the same image and want them all merged into one result."}),
+                "color_match": ("BOOLEAN", {"default": True, "tooltip": "When accumulate is enabled, apply histogram matching to adjust inpainted colors to match the surrounding original image. Helps with color consistency across multiple inpainted regions."}),
             }
         }
 
@@ -1609,7 +1729,7 @@ class InpaintStitchImproved:
     FUNCTION = "inpaint_stitch"
 
 
-    def inpaint_stitch(self, stitcher, inpainted_image, accumulate=False):
+    def inpaint_stitch(self, stitcher, inpainted_image, accumulate=False, color_match=True):
         inpainted_image = inpainted_image.clone()
         results = []
 
@@ -1636,12 +1756,21 @@ class InpaintStitchImproved:
 
         if accumulate:
             # Accumulate all inpainted regions into a single output image
-            result_image = self.inpaint_stitch_accumulated(stitcher, inpainted_image, processor, batch_size, override)
+            result_image = self.inpaint_stitch_accumulated(stitcher, inpainted_image, processor, batch_size, override, color_match)
             result_image = result_image.cpu()
             return (result_image,)
 
+        pad_to_max_size = stitcher.get('pad_to_max_size', False)
+
         for i in range(batch_size):
             one_image = inpainted_image[i:i+1]
+            idx = 0 if override else i
+
+            # If pad_to_max_size was used, extract only the original (non-padded) region
+            if pad_to_max_size and 'original_crop_h' in stitcher:
+                orig_crop_h = stitcher['original_crop_h'][idx]
+                orig_crop_w = stitcher['original_crop_w'][idx]
+                one_image = one_image[:, :orig_crop_h, :orig_crop_w, :]
 
             one_stitcher = {}
             for key in ['downscale_algorithm', 'upscale_algorithm', 'blend_pixels']:
@@ -1652,6 +1781,11 @@ class InpaintStitchImproved:
                 else:
                     one_stitcher[key] = stitcher[key][i]
 
+            # If pad_to_max_size was used, extract only the original mask region
+            if pad_to_max_size and 'original_crop_h' in stitcher:
+                orig_mask = one_stitcher['cropped_mask_for_blend']
+                one_stitcher['cropped_mask_for_blend'] = orig_mask[:, :orig_crop_h, :orig_crop_w]
+
             one_image, = self.inpaint_stitch_single_image(one_stitcher, one_image, processor)
             results.append(one_image.squeeze(0))
 
@@ -1660,7 +1794,83 @@ class InpaintStitchImproved:
 
         return (result_batch,)
 
-    def inpaint_stitch_accumulated(self, stitcher, inpainted_image, processor, batch_size, override):
+    def histogram_match_channel(self, source, reference):
+        """
+        Match the histogram of a single channel from source to reference.
+        Both source and reference should be 1D tensors of pixel values in [0, 1].
+        """
+        if source.numel() == 0 or reference.numel() == 0:
+            return source
+
+        device = source.device
+
+        # Get sorted values and indices for source
+        src_sorted, src_indices = torch.sort(source.flatten())
+
+        # Get sorted values for reference
+        ref_sorted, _ = torch.sort(reference.flatten())
+
+        # Create mapping: for each source pixel, find the corresponding reference value
+        # by matching positions in the sorted arrays
+        src_len = src_sorted.shape[0]
+        ref_len = ref_sorted.shape[0]
+
+        # Map source indices to reference indices (linear interpolation)
+        interp_indices = torch.linspace(0, ref_len - 1, src_len, device=device).long()
+        interp_indices = interp_indices.clamp(0, ref_len - 1)
+
+        # Get the matched values
+        matched_sorted = ref_sorted[interp_indices]
+
+        # Unsort to get back to original order
+        result = torch.empty_like(source.flatten())
+        result[src_indices] = matched_sorted
+
+        return result.reshape(source.shape)
+
+    def histogram_match_region(self, inpainted, reference, mask):
+        """
+        Apply histogram matching to the inpainted region using the reference (original) context.
+
+        Args:
+            inpainted: The inpainted image region [1, H, W, C]
+            reference: The original image context to match [1, H, W, C]
+            mask: The blend mask [1, H, W, 1] where 1 = inpainted area
+
+        Returns:
+            Color-matched inpainted region
+        """
+        if inpainted.numel() == 0 or reference.numel() == 0:
+            return inpainted
+
+        result = inpainted.clone()
+
+        # Get the non-masked (context) pixels from reference for histogram matching
+        # Use pixels where mask < 0.5 as the reference distribution
+        ref_mask = (mask < 0.5).squeeze(-1)  # [1, H, W]
+
+        # If no reference pixels available, return unchanged
+        if not ref_mask.any():
+            return inpainted
+
+        # Process each color channel independently
+        for c in range(inpainted.shape[-1]):
+            src_channel = inpainted[0, :, :, c]  # [H, W]
+            ref_channel = reference[0, :, :, c]  # [H, W]
+
+            # Get reference pixels (non-masked areas)
+            ref_pixels = ref_channel[ref_mask[0]]
+
+            if ref_pixels.numel() < 10:  # Need enough reference pixels
+                continue
+
+            # Match the entire source channel to the reference distribution
+            matched = self.histogram_match_channel(src_channel, ref_pixels)
+            result[0, :, :, c] = matched
+
+        return result
+
+    def inpaint_stitch_accumulated(self, stitcher, inpainted_image, processor, batch_size, override, color_match=True):
         """
         Accumulates all inpainted regions into a single output image.
 
@@ -1669,6 +1879,7 @@ class InpaintStitchImproved:
         """
         downscale_algorithm = stitcher['downscale_algorithm']
         upscale_algorithm = stitcher['upscale_algorithm']
+        pad_to_max_size = stitcher.get('pad_to_max_size', False)
 
         # Get original image dimensions from the first entry
         cto_w = stitcher['canvas_to_orig_w'][0]
@@ -1685,8 +1896,13 @@ class InpaintStitchImproved:
             idx = 0 if override else i
             one_image = inpainted_image[i:i+1]
 
+            # If pad_to_max_size was used, extract only the original (non-padded) region
+            if pad_to_max_size and 'original_crop_h' in stitcher:
+                orig_crop_h = stitcher['original_crop_h'][idx]
+                orig_crop_w = stitcher['original_crop_w'][idx]
+                one_image = one_image[:, :orig_crop_h, :orig_crop_w, :]
+
             # Get stitcher data for this region
-            canvas_image = stitcher['canvas_image'][idx]
             ctc_x = stitcher['cropped_to_canvas_x'][idx]
             ctc_y = stitcher['cropped_to_canvas_y'][idx]
             ctc_w = stitcher['cropped_to_canvas_w'][idx]
@@ -1696,6 +1912,16 @@ class InpaintStitchImproved:
             item_cto_w = stitcher['canvas_to_orig_w'][idx]
             item_cto_h = stitcher['canvas_to_orig_h'][idx]
             mask = stitcher['cropped_mask_for_blend'][idx]  # shape: [1, H, W]
+
+            # If pad_to_max_size was used, extract only the original mask region
+            if pad_to_max_size and 'original_crop_h' in stitcher:
+                mask = mask[:, :orig_crop_h, :orig_crop_w]
+
+            # Verify original dimensions are consistent across all stitcher entries
+            if item_cto_w != cto_w or item_cto_h != cto_h:
+                print(f"InpaintStitchImproved: Warning - inconsistent original dimensions at index {idx}. "
+                      f"Expected ({cto_w}, {cto_h}), got ({item_cto_w}, {item_cto_h}). Skipping this region.")
+                continue
 
             # Resize inpainted image and mask to match the cropped-to-canvas size
             B, h, w, _ = one_image.shape
@@ -1736,6 +1962,10 @@ class InpaintStitchImproved:
             inpaint_region = resized_image[:, inpaint_y1:inpaint_y2, inpaint_x1:inpaint_x2]
             mask_region = resized_mask[:, inpaint_y1:inpaint_y2, inpaint_x1:inpaint_x2].unsqueeze(-1)
             accum_region = accumulator[:, orig_y1:orig_y2, orig_x1:orig_x2]
+
+            # Apply histogram matching to adjust inpainted colors to match original context
+            if color_match:
+                inpaint_region = self.histogram_match_region(inpaint_region, accum_region, mask_region)
 
             # Blend: new = mask * inpainted + (1 - mask) * accumulator
             blended = mask_region * inpaint_region + (1.0 - mask_region) * accum_region
