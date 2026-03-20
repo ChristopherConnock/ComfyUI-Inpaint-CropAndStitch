@@ -143,7 +143,7 @@ class CPUProcessorLogic(ProcessorLogic):
         results = []
         for i in range(mask.shape[0]):
             mask_np = mask[i].cpu().numpy()
-            dilated_mask = grey_dilation(mask_np, footprint=kernel)
+            dilated_mask = grey_dilation(mask_np, footprint=kernel, mode='reflect')
             results.append(torch.from_numpy(dilated_mask.astype(np.float32)).clamp(0.0, 1.0))
         return torch.stack(results, dim=0)
 
@@ -157,7 +157,7 @@ class CPUProcessorLogic(ProcessorLogic):
         results = []
         for i in range(samples.shape[0]):
             mask_np = samples[i].cpu().numpy()
-            blurred_mask = gaussian_filter(mask_np, sigma=sigma)
+            blurred_mask = gaussian_filter(mask_np, sigma=sigma, mode='reflect')
             results.append(torch.from_numpy(blurred_mask).float().clamp(0.0, 1.0))
         return torch.stack(results, dim=0)
 
@@ -673,8 +673,11 @@ class GPUProcessorLogic(ProcessorLogic):
         # mask is [B, H, W] -> [B, 1, H, W]
         mask_in = mask.unsqueeze(1)
         
+        # Reflect padding to avoid border transparency
+        mask_padded = TF.pad(mask_in, (padding, padding, padding, padding), mode='reflect')
+        
         # MaxPool2d is equivalent to dilation with a square kernel of 1s
-        dilated = TF.max_pool2d(mask_in, kernel_size=kernel_size, stride=1, padding=padding)
+        dilated = TF.max_pool2d(mask_padded, kernel_size=kernel_size, stride=1, padding=0)
         
         return dilated.squeeze(1)
 
@@ -697,7 +700,11 @@ class GPUProcessorLogic(ProcessorLogic):
         kernel_2d = kernel_2d.expand(1, 1, kernel_size, kernel_size)
         
         mask_in = samples.unsqueeze(1)
-        blurred = TF.conv2d(mask_in, kernel_2d, padding=kernel_size//2, groups=1)
+        pad = kernel_size // 2
+        
+        # Reflect padding before convolution so the border stays solid
+        mask_padded = TF.pad(mask_in, (pad, pad, pad, pad), mode='reflect')
+        blurred = TF.conv2d(mask_padded, kernel_2d, padding=0, groups=1)
         
         return blurred.squeeze(1).clamp(0.0, 1.0)
 
