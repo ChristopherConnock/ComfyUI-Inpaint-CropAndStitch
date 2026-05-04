@@ -1272,8 +1272,12 @@ class InpaintCropImproved:
         image = image.clone()
         if mask is not None:
             mask = mask.clone()
+            if mask.ndim == 2:
+                mask = mask.unsqueeze(0)  # (H, W) -> (1, H, W)
         if optional_context_mask is not None:
             optional_context_mask = optional_context_mask.clone()
+            if optional_context_mask.ndim == 2:
+                optional_context_mask = optional_context_mask.unsqueeze(0)  # (H, W) -> (1, H, W)
 
         if device_mode == "gpu (much faster)":
             device = comfy.model_management.get_torch_device()
