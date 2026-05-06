@@ -5,6 +5,11 @@ import nodes
 import numpy as np
 import os
 import torch
+
+# TEMPORARY DIAGNOSTIC — prints once at module import time to confirm WHICH
+# copy of this file ComfyUI is actually loading. Remove with the other
+# diagnostic prints once the accumulate report is resolved.
+print(f"[InpaintCropAndStitch DEBUG] module loaded from {__file__}", flush=True)
 import torch.nn.functional as TF
 import torchvision.transforms.functional as F
 from PIL import Image
@@ -1238,7 +1243,7 @@ class InpaintStitchImproved:
               f"inpainted_batch={inpainted_image.shape[0]} "
               f"stitcher_entries={len(stitcher.get('cropped_to_canvas_x', []))} "
               f"pad_to_max_size={stitcher.get('pad_to_max_size', False)} "
-              f"device_mode={stitcher.get('device_mode', '?')}")
+              f"device_mode={stitcher.get('device_mode', '?')}", flush=True)
 
         inpainted_image = inpainted_image.clone()
         results = []
