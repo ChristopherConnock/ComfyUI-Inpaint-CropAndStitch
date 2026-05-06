@@ -1231,6 +1231,15 @@ class InpaintStitchImproved:
 
 
     def inpaint_stitch(self, stitcher, inpainted_image, accumulate=False, color_match=True):
+        # TEMPORARY DIAGNOSTIC — remove once the "accumulate=True returns 3
+        # images" report is resolved. Logs exactly what the node is receiving
+        # so we can tell whether the bug is value-not-arriving vs. logic.
+        print(f"[InpaintStitch DEBUG] accumulate={accumulate!r} color_match={color_match!r} "
+              f"inpainted_batch={inpainted_image.shape[0]} "
+              f"stitcher_entries={len(stitcher.get('cropped_to_canvas_x', []))} "
+              f"pad_to_max_size={stitcher.get('pad_to_max_size', False)} "
+              f"device_mode={stitcher.get('device_mode', '?')}")
+
         inpainted_image = inpainted_image.clone()
         results = []
 
