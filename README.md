@@ -51,7 +51,13 @@ Note: this video tutorial is for the previous version of the nodes, but still it
 - `context_from_mask_extend_factor`: Extends the context area by a factor of the size of the mask. The higher this value is, the more area will be cropped around the mask for the model to have more context. 1 means do not grow. 2 means grow the same size of the mask across every direction.
 - `output_resize_to_target_size`: Forces that the cropped image has a specific resolution. This may involve resizing and extending out of the original image, but the stitch node reverts those changes to integrate the image seamlessly.
 - `output_padding`: Ensures that the cropped image width and height are a multiple of this padding value. Models require images to be padded to a certain value (8, 16, 32) to function properly.
+- `pad_to_max_size`: When processing multiple masks, makes every cropped output the same shape so they can be sampled as a batch. With `output_resize_to_target_size` off, pads each crop up to the largest natural crop size. With `output_resize_to_target_size` on, scales each crop to fit within the target (preserving aspect ratio) and pads the remainder. Pair with the Stitch node's `accumulate` to merge the regions back into one image.
+- `uniform_scale`: Only meaningful when `pad_to_max_size` and `output_resize_to_target_size` are both on. Applies the *same* scale factor to every crop (chosen to fit the largest crop within the target) so all inpainted regions sample at consistent detail. Off by default — each crop is independently scaled to maximize its own resolution.
 - `device_mode`: `cpu (compatible)` should always work but is slow, `gpu (much faster)` is much faster but may not work in all setups. Default is GPU given the performance improvements.
+
+### Inpaint Stitch Parameters
+- `accumulate`: Combines all inpainted regions into a single output image. Use when you have multiple masks for different regions of the same image and want them merged into one result. Without it, each region is stitched into its own output frame.
+- `color_match`: Only used when `accumulate` is on. Applies histogram matching against the surrounding original image so the inpainted region's colors blend more naturally with their neighborhood. Helps with color consistency across multiple inpainted regions. On by default.
 
 ## Example (Stable Diffusion)
 This example inpaints by sampling on a small section of the larger image, upscaling to fit 512x512, then stitching and blending back in the original image.

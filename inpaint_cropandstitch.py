@@ -3,6 +3,7 @@ import comfy.model_management
 import math
 import nodes
 import numpy as np
+import os
 import torch
 import torch.nn.functional as TF
 import torchvision.transforms.functional as F
@@ -132,8 +133,13 @@ class ProcessorLogic(ABC):
     def extend_imm(self, image, mask, optional_context_mask, extend_up_factor, extend_down_factor, extend_left_factor, extend_right_factor):
         B, H, W, C = image.shape
 
-        new_H = int(H * (1.0 + extend_up_factor - 1.0 + extend_down_factor - 1.0))
-        new_W = int(W * (1.0 + extend_left_factor - 1.0 + extend_right_factor - 1.0))
+        # Factor convention: 1.0 = no change, 1.5 = extend that side by 50% of
+        # the original dimension. New_dim = orig + up_extension + down_extension
+        # = H * (up_factor - 1) + H * (down_factor - 1) + H
+        # = H * (up_factor + down_factor - 1).
+        # Factors < 1.0 crop instead of extend.
+        new_H = int(H * (extend_up_factor + extend_down_factor - 1.0))
+        new_W = int(W * (extend_left_factor + extend_right_factor - 1.0))
 
         assert new_H >= 0, f"Error: Trying to crop too much, height ({new_H}) must be >= 0"
         assert new_W >= 0, f"Error: Trying to crop too much, width ({new_W}) must be >= 0"
@@ -602,7 +608,8 @@ class GPUProcessorLogic(ProcessorLogic):
         kernel_1d = kernel_1d / kernel_1d.sum()
         
         kernel_2d = kernel_1d.unsqueeze(1) * kernel_1d.unsqueeze(0)
-        kernel_2d = kernel_2d.expand(1, 1, kernel_size, kernel_size)
+        # Use view, not expand — conv2d wants a contiguous weight tensor.
+        kernel_2d = kernel_2d.view(1, 1, kernel_size, kernel_size)
         
         mask_in = samples.unsqueeze(1)
         pad = kernel_size // 2
@@ -707,68 +714,66 @@ class InpaintCropImproved:
     CATEGORY = "inpaint"
     DESCRIPTION = "Crops an image around a mask for inpainting, the optional context mask defines an extra area to keep for the context."
 
-    # Remove the following # to turn on debug mode (extra outputs, print statements)
-    #'''
-    DEBUG_MODE = False
-    RETURN_TYPES = ("STITCHER", "IMAGE", "MASK")
-    RETURN_NAMES = ("stitcher", "cropped_image", "cropped_mask")
+    # Set env var INPAINT_CROPANDSTITCH_DEBUG=1 to expose extra debug outputs
+    # and enable print statements. Off by default.
+    DEBUG_MODE = os.environ.get("INPAINT_CROPANDSTITCH_DEBUG") == "1"
 
-    '''
-    
-    DEBUG_MODE = True
-    RETURN_TYPES = ("STITCHER", "IMAGE", "MASK",
-        # DEBUG
-        "IMAGE",
-        "MASK",
-        "MASK",
-        "MASK",
-        "MASK",
-        "MASK",
-        "MASK",
-        "IMAGE",
-        "MASK",
-        "MASK",
-        "IMAGE",
-        "MASK",
-        "IMAGE",
-        "MASK",
-        "IMAGE",
-        "MASK",
-        "IMAGE",
-        "IMAGE",
-        "MASK",
-        "IMAGE",
-        "IMAGE",
-        "IMAGE",
-        "MASK",
-    )
-    RETURN_NAMES = ("stitcher", "cropped_image", "cropped_mask",
-        # DEBUG
-        "DEBUG_preresize_image",
-        "DEBUG_preresize_mask",
-        "DEBUG_fillholes_mask",
-        "DEBUG_expand_mask",
-        "DEBUG_invert_mask",
-        "DEBUG_blur_mask",
-        "DEBUG_hipassfilter_mask",
-        "DEBUG_extend_image",
-        "DEBUG_extend_mask",
-        "DEBUG_context_from_mask",
-        "DEBUG_context_from_mask_location",
-        "DEBUG_context_expand",
-        "DEBUG_context_expand_location",
-        "DEBUG_context_with_context_mask",
-        "DEBUG_context_with_context_mask_location",
-        "DEBUG_context_to_target",
-        "DEBUG_context_to_target_location",
-        "DEBUG_context_to_target_image",
-        "DEBUG_context_to_target_mask",
-        "DEBUG_canvas_image",
-        "DEBUG_orig_in_canvas_location",
-        "DEBUG_cropped_in_canvas_location",
-        "DEBUG_cropped_mask_blend",
-    )
-    #'''
+    if DEBUG_MODE:
+        RETURN_TYPES = ("STITCHER", "IMAGE", "MASK",
+            # DEBUG
+            "IMAGE",
+            "MASK",
+            "MASK",
+            "MASK",
+            "MASK",
+            "MASK",
+            "MASK",
+            "IMAGE",
+            "MASK",
+            "MASK",
+            "IMAGE",
+            "MASK",
+            "IMAGE",
+            "MASK",
+            "IMAGE",
+            "MASK",
+            "IMAGE",
+            "IMAGE",
+            "MASK",
+            "IMAGE",
+            "IMAGE",
+            "IMAGE",
+            "MASK",
+        )
+        RETURN_NAMES = ("stitcher", "cropped_image", "cropped_mask",
+            # DEBUG
+            "DEBUG_preresize_image",
+            "DEBUG_preresize_mask",
+            "DEBUG_fillholes_mask",
+            "DEBUG_expand_mask",
+            "DEBUG_invert_mask",
+            "DEBUG_blur_mask",
+            "DEBUG_hipassfilter_mask",
+            "DEBUG_extend_image",
+            "DEBUG_extend_mask",
+            "DEBUG_context_from_mask",
+            "DEBUG_context_from_mask_location",
+            "DEBUG_context_expand",
+            "DEBUG_context_expand_location",
+            "DEBUG_context_with_context_mask",
+            "DEBUG_context_with_context_mask_location",
+            "DEBUG_context_to_target",
+            "DEBUG_context_to_target_location",
+            "DEBUG_context_to_target_image",
+            "DEBUG_context_to_target_mask",
+            "DEBUG_canvas_image",
+            "DEBUG_orig_in_canvas_location",
+            "DEBUG_cropped_in_canvas_location",
+            "DEBUG_cropped_mask_blend",
+        )
+    else:
+        RETURN_TYPES = ("STITCHER", "IMAGE", "MASK")
+        RETURN_NAMES = ("stitcher", "cropped_image", "cropped_mask")
  
     def inpaint_crop(self, image, downscale_algorithm, upscale_algorithm, preresize, preresize_mode, preresize_min_width, preresize_min_height, preresize_max_width, preresize_max_height, extend_for_outpainting, extend_up_factor, extend_down_factor, extend_left_factor, extend_right_factor, mask_hipass_filter, mask_fill_holes, mask_expand_pixels, mask_invert, mask_blend_pixels, context_from_mask_extend_factor, output_resize_to_target_size, output_target_width, output_target_height, output_padding, pad_to_max_size, uniform_scale, device_mode, mask=None, optional_context_mask=None):
         image = image.clone()
@@ -1225,6 +1230,11 @@ class InpaintStitchImproved:
         inpainted_image = inpainted_image.clone()
         results = []
 
+        # Shallow-copy so the device-shuffle below doesn't mutate the caller's
+        # stitcher dict. ComfyUI may cache and reuse stitcher objects between
+        # runs.
+        stitcher = dict(stitcher)
+
         device_mode = stitcher.get('device_mode', 'cpu (compatible)')
 
         if device_mode == "gpu (much faster)":
@@ -1409,10 +1419,16 @@ class InpaintStitchImproved:
             if pad_to_max_size and 'original_crop_h' in stitcher:
                 mask = mask[:, :orig_crop_h, :orig_crop_w]
 
-            # Verify original dimensions are consistent across all stitcher entries
-            if item_cto_w != cto_w or item_cto_h != cto_h:
-                print(f"InpaintStitchImproved: Warning - inconsistent original dimensions at index {idx}. "
-                      f"Expected ({cto_w}, {cto_h}), got ({item_cto_w}, {item_cto_h}). Skipping this region.")
+            # Verify original-image anchor and size are consistent across all
+            # stitcher entries — accumulate composes onto a single accumulator
+            # extracted from the first canvas, so any divergence here would
+            # paste pixels at the wrong offset.
+            if (item_cto_w != cto_w or item_cto_h != cto_h
+                    or item_cto_x != cto_x or item_cto_y != cto_y):
+                print(f"InpaintStitchImproved: Warning - inconsistent original anchor at index {idx}. "
+                      f"Expected x={cto_x} y={cto_y} w={cto_w} h={cto_h}, "
+                      f"got x={item_cto_x} y={item_cto_y} w={item_cto_w} h={item_cto_h}. "
+                      f"Skipping this region.")
                 continue
 
             # Resize inpainted image and mask to match the cropped-to-canvas size
