@@ -42,6 +42,21 @@ function inpaintCropAndStitchHandler(node) {
             toggleWidget(node, findWidgetByName(node, "output_target_width"), true);
             toggleWidget(node, findWidgetByName(node, "output_target_height"), true);
         }
+        // uniform_scale only does anything when both pad_to_max_size and
+        // output_resize_to_target_size are enabled.
+        toggleWidget(node, findWidgetByName(node, "uniform_scale"));
+        if (findWidgetByName(node, "pad_to_max_size").value == true &&
+            findWidgetByName(node, "output_resize_to_target_size").value == true) {
+            toggleWidget(node, findWidgetByName(node, "uniform_scale"), true);
+        }
+    }
+
+    if (node.comfyClass == "InpaintStitchImproved") {
+        // color_match only applies in accumulate mode.
+        toggleWidget(node, findWidgetByName(node, "color_match"));
+        if (findWidgetByName(node, "accumulate").value == true) {
+            toggleWidget(node, findWidgetByName(node, "color_match"), true);
+        }
     }
 
     // OLD

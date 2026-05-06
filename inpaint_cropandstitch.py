@@ -59,32 +59,13 @@ class ProcessorLogic(ABC):
     def batched_findcontextarea_m(self, mask):
         pass
 
-    def findcontextarea_m(self, mask):
-        # Default implementation for single masks using the batched version
-        # mask is [1, H, W]
-        _, x, y, w, h = self.batched_findcontextarea_m(mask)
-        context = mask[:, y[0]:y[0]+h[0], x[0]:x[0]+w[0]]
-        return context, x[0].item(), y[0].item(), w[0].item(), h[0].item()
-
     @abstractmethod
     def batched_growcontextarea_m(self, mask, x, y, w, h, extend_factor):
         pass
 
-    def growcontextarea_m(self, context, mask, x, y, w, h, extend_factor):
-        _, nx, ny, nw, nh = self.batched_growcontextarea_m(mask, torch.tensor([x], device=mask.device), torch.tensor([y], device=mask.device), torch.tensor([w], device=mask.device), torch.tensor([h], device=mask.device), extend_factor)
-        nx, ny, nw, nh = nx[0].item(), ny[0].item(), nw[0].item(), nh[0].item()
-        ctx = mask[:, ny:ny+nh, nx:nx+nw]
-        return ctx, nx, ny, nw, nh
-
     @abstractmethod
     def batched_combinecontextmask_m(self, mask, x, y, w, h, optional_context_mask):
         pass
-
-    def combinecontextmask_m(self, context, mask, x, y, w, h, optional_context_mask):
-        _, nx, ny, nw, nh = self.batched_combinecontextmask_m(mask, torch.tensor([x], device=mask.device), torch.tensor([y], device=mask.device), torch.tensor([w], device=mask.device), torch.tensor([h], device=mask.device), optional_context_mask)
-        nx, ny, nw, nh = nx[0].item(), ny[0].item(), nw[0].item(), nh[0].item()
-        ctx = mask[:, ny:ny+nh, nx:nx+nw]
-        return ctx, nx, ny, nw, nh
 
     @abstractmethod
     def crop_magic_im(self, image, mask, x, y, w, h, target_w, target_h, padding, downscale_algorithm, upscale_algorithm, resize_output=True):
@@ -204,7 +185,7 @@ class CPUProcessorLogic(ProcessorLogic):
             scale_factor_max = min(scale_factor_max_width, scale_factor_max_height)
 
             if scale_factor_min > 1 and scale_factor_max < 1:
-                assert False, "Cannot meet both minimum and maximum resolution requirements with aspect ratio preservation."
+                raise ValueError("Cannot meet both minimum and maximum resolution requirements with aspect ratio preservation.")
             
             if scale_factor_min > 1:  # We're upscaling to meet min resolution
                 scale_factor = scale_factor_min
@@ -599,8 +580,6 @@ class CPUProcessorLogic(ProcessorLogic):
 class GPUProcessorLogic(ProcessorLogic):
     def rescale_i(self, samples, width, height, algorithm: str):
         # samples shape: [B, H, W, C]
-        mode = algorithm.lower()
-        
         # CPU works better, fallback to CPU for rescaling
         original_device = samples.device
         samples = samples.movedim(-1, 1)  # [B, C, H, W]
@@ -612,16 +591,9 @@ class GPUProcessorLogic(ProcessorLogic):
         samples = torch.stack(results, dim=0).to(original_device)
         samples = samples.movedim(1, -1)
         return samples
-        
-        #samples = samples.movedim(-1, 1)  # [B, C, H, W]
-        #samples = TF.interpolate(samples, size=(height, width), mode=mode, align_corners=False if mode not in ['nearest', 'area'] else None)
-        #samples = samples.movedim(1, -1)
-        #return samples
 
     def rescale_m(self, samples, width, height, algorithm: str):
         # samples shape: [B, H, W]
-        mode = algorithm.lower()
-        
         # CPU works better, fallback to CPU for rescaling
         original_device = samples.device
         algorithm_enum = getattr(Image, algorithm.upper())
@@ -631,11 +603,6 @@ class GPUProcessorLogic(ProcessorLogic):
             results.append(F.to_tensor(samples_pil).squeeze(0))
         samples = torch.stack(results, dim=0).to(original_device)
         return samples
-        
-        #samples = samples.unsqueeze(1)  # [B, H, W] -> [B, 1, H, W]
-        #samples = TF.interpolate(samples, size=(height, width), mode=mode, align_corners=False if mode not in ['nearest', 'area'] else None)
-        #samples = samples.squeeze(1)
-        #return samples
 
     def fillholes_iterative_hipass_fill_m(self, samples):
         # We want this to always run in CPU for simplicity of implementation.
@@ -751,7 +718,7 @@ class GPUProcessorLogic(ProcessorLogic):
             scale_factor_max = min(scale_factor_max_width, scale_factor_max_height)
 
             if scale_factor_min > 1 and scale_factor_max < 1:
-                assert False, "Cannot meet both minimum and maximum resolution requirements with aspect ratio preservation."
+                raise ValueError("Cannot meet both minimum and maximum resolution requirements with aspect ratio preservation.")
             
             if scale_factor_min > 1:  # We're upscaling to meet min resolution
                 scale_factor = scale_factor_min
@@ -1292,8 +1259,10 @@ class InpaintCropImproved:
         
         # Check that some parameters make sense
         if preresize and preresize_mode == "ensure minimum and maximum resolution":
-            assert preresize_max_width >= preresize_min_width, "Preresize maximum width must be greater than or equal to minimum width"
-            assert preresize_max_height >= preresize_min_height, "Preresize maximum height must be greater than or equal to minimum height"
+            if preresize_max_width < preresize_min_width:
+                raise ValueError("Preresize maximum width must be greater than or equal to minimum width")
+            if preresize_max_height < preresize_min_height:
+                raise ValueError("Preresize maximum height must be greater than or equal to minimum height")
 
         if self.DEBUG_MODE:
             print('Inpaint Crop Batch input')
@@ -1303,8 +1272,8 @@ class InpaintCropImproved:
             if optional_context_mask is not None:
                 print(optional_context_mask.shape, type(optional_context_mask), optional_context_mask.dtype)
 
-        if image.shape[0] > 1:
-            assert output_resize_to_target_size or pad_to_max_size, "output_resize_to_target_size or pad_to_max_size must be enabled when input is a batch of images, given all images in the batch output have to be the same size"
+        if image.shape[0] > 1 and not (output_resize_to_target_size or pad_to_max_size):
+            raise ValueError("output_resize_to_target_size or pad_to_max_size must be enabled when input is a batch of images, given all images in the batch output have to be the same size")
 
         # When a LoadImage node passes a mask without user editing, it may be the wrong shape.
         # Detect and fix that to avoid shape mismatch errors.
@@ -1348,13 +1317,20 @@ class InpaintCropImproved:
             print(optional_context_mask.shape, type(optional_context_mask), optional_context_mask.dtype)
 
          # Validate data
-        assert image.ndimension() == 4, f"Expected 4 dimensions for image, got {image.ndimension()}"
-        assert mask.ndimension() == 3, f"Expected 3 dimensions for mask, got {mask.ndimension()}"
-        assert optional_context_mask.ndimension() == 3, f"Expected 3 dimensions for optional_context_mask, got {optional_context_mask.ndimension()}"
-        assert mask.shape[1:] == image.shape[1:3], f"Mask dimensions do not match image dimensions. Expected {image.shape[1:3]}, got {mask.shape[1:]}"
-        assert optional_context_mask.shape[1:] == image.shape[1:3], f"optional_context_mask dimensions do not match image dimensions. Expected {image.shape[1:3]}, got {optional_context_mask.shape[1:]}"
-        assert mask.shape[0] == image.shape[0], f"Mask batch does not match image batch. Expected {image.shape[0]}, got {mask.shape[0]}"
-        assert optional_context_mask.shape[0] == image.shape[0], f"Optional context mask batch does not match image batch. Expected {image.shape[0]}, got {optional_context_mask.shape[0]}"
+        if image.ndimension() != 4:
+            raise ValueError(f"Expected 4 dimensions for image, got {image.ndimension()}")
+        if mask.ndimension() != 3:
+            raise ValueError(f"Expected 3 dimensions for mask, got {mask.ndimension()}")
+        if optional_context_mask.ndimension() != 3:
+            raise ValueError(f"Expected 3 dimensions for optional_context_mask, got {optional_context_mask.ndimension()}")
+        if mask.shape[1:] != image.shape[1:3]:
+            raise ValueError(f"Mask dimensions do not match image dimensions. Expected {image.shape[1:3]}, got {mask.shape[1:]}")
+        if optional_context_mask.shape[1:] != image.shape[1:3]:
+            raise ValueError(f"optional_context_mask dimensions do not match image dimensions. Expected {image.shape[1:3]}, got {optional_context_mask.shape[1:]}")
+        if mask.shape[0] != image.shape[0]:
+            raise ValueError(f"Mask batch does not match image batch. Expected {image.shape[0]}, got {mask.shape[0]}")
+        if optional_context_mask.shape[0] != image.shape[0]:
+            raise ValueError(f"Optional context mask batch does not match image batch. Expected {image.shape[0]}, got {optional_context_mask.shape[0]}")
 
         # Results
         result_stitcher = {
@@ -1976,14 +1952,3 @@ class InpaintStitchImproved:
         output_image = processor.stitch_magic_im(canvas_image, inpainted_image, mask, ctc_x, ctc_y, ctc_w, ctc_h, cto_x, cto_y, cto_w, cto_h, downscale_algorithm, upscale_algorithm)
 
         return (output_image,)
-
-# Mappings for ComfyUI
-NODE_CLASS_MAPPINGS = {
-    "InpaintCropImproved": InpaintCropImproved,
-    "InpaintStitchImproved": InpaintStitchImproved
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "InpaintCropImproved": "Inpaint Crop Improved",
-    "InpaintStitchImproved": "Inpaint Stitch Improved"
-}
