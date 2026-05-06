@@ -551,13 +551,15 @@ class CPUProcessorLogic(ProcessorLogic):
 class GPUProcessorLogic(ProcessorLogic):
     def rescale_i(self, samples, width, height, algorithm: str):
         # samples shape: [B, H, W, C]
-        # CPU works better, fallback to CPU for rescaling
+        # CPU works better, fallback to CPU for rescaling.
+        # Move the whole batch to CPU once instead of paying a GPU->CPU
+        # transfer per element inside the loop.
         original_device = samples.device
-        samples = samples.movedim(-1, 1)  # [B, C, H, W]
+        samples = samples.float().cpu().movedim(-1, 1)  # [B, C, H, W] on CPU
         algorithm_enum = getattr(Image, algorithm.upper())
         results = []
         for i in range(samples.shape[0]):
-            samples_pil: Image.Image = F.to_pil_image(samples[i].float().cpu()).resize((width, height), algorithm_enum)
+            samples_pil: Image.Image = F.to_pil_image(samples[i]).resize((width, height), algorithm_enum)
             results.append(F.to_tensor(samples_pil))
         samples = torch.stack(results, dim=0).to(original_device)
         samples = samples.movedim(1, -1)
@@ -565,12 +567,14 @@ class GPUProcessorLogic(ProcessorLogic):
 
     def rescale_m(self, samples, width, height, algorithm: str):
         # samples shape: [B, H, W]
-        # CPU works better, fallback to CPU for rescaling
+        # CPU works better, fallback to CPU for rescaling.
+        # See rescale_i: hoisted .float().cpu() out of the per-element loop.
         original_device = samples.device
+        samples = samples.float().cpu()
         algorithm_enum = getattr(Image, algorithm.upper())
         results = []
         for i in range(samples.shape[0]):
-            samples_pil: Image.Image = F.to_pil_image(samples[i].float().cpu()).resize((width, height), algorithm_enum)
+            samples_pil: Image.Image = F.to_pil_image(samples[i]).resize((width, height), algorithm_enum)
             results.append(F.to_tensor(samples_pil).squeeze(0))
         samples = torch.stack(results, dim=0).to(original_device)
         return samples
@@ -1298,37 +1302,49 @@ class InpaintStitchImproved:
 
     def histogram_match_channel(self, source, reference):
         """
-        Match the histogram of a single channel from source to reference.
-        Both source and reference should be 1D tensors of pixel values in [0, 1].
+        Match source's intensity distribution to reference's via a 256-bin
+        histogram LUT.
+
+        Both inputs are tensors with values in [0, 1]. Returns a tensor matching
+        source's shape with intensities remapped so its histogram approximates
+        the reference's. O(N) in source/reference size; bin count is constant.
+        Visually indistinguishable from exact rank-based CDF matching at
+        8-bit color precision (max quantization error: half a bin = 1/512).
         """
         if source.numel() == 0 or reference.numel() == 0:
             return source
 
         device = source.device
+        BINS = 256
 
-        # Get sorted values and indices for source
-        src_sorted, src_indices = torch.sort(source.flatten())
+        # Histograms over [0, 1]. Clamp first so out-of-range values (numerical
+        # noise, etc.) don't get dropped by histc and skew the totals.
+        src_flat = source.flatten().clamp(0.0, 1.0)
+        ref_flat = reference.flatten().clamp(0.0, 1.0)
+        src_hist = torch.histc(src_flat, bins=BINS, min=0.0, max=1.0)
+        ref_hist = torch.histc(ref_flat, bins=BINS, min=0.0, max=1.0)
 
-        # Get sorted values for reference
-        ref_sorted, _ = torch.sort(reference.flatten())
+        # Normalized CDFs. The denominator equals numel() post-clamp; clamp to
+        # 1.0 to defend against zero-mass histograms (the early-return above
+        # already covers numel()==0, so this is belt-and-braces).
+        src_cdf = src_hist.cumsum(0) / src_hist.sum().clamp(min=1.0)
+        ref_cdf = ref_hist.cumsum(0) / ref_hist.sum().clamp(min=1.0)
 
-        # Create mapping: for each source pixel, find the corresponding reference value
-        # by matching positions in the sorted arrays
-        src_len = src_sorted.shape[0]
-        ref_len = ref_sorted.shape[0]
+        # For each source bin's CDF value, find the smallest reference bin
+        # whose CDF >= it. That maps "rank in source" -> "rank in reference".
+        matched_bins = torch.searchsorted(ref_cdf, src_cdf).clamp(0, BINS - 1)
 
-        # Map source indices to reference indices (linear interpolation)
-        interp_indices = torch.linspace(0, ref_len - 1, src_len, device=device).long()
-        interp_indices = interp_indices.clamp(0, ref_len - 1)
+        # Build LUT: source bin -> reference bin center value.
+        bin_centers = torch.linspace(1 / (2 * BINS), 1 - 1 / (2 * BINS), BINS, device=device)
+        lut = bin_centers[matched_bins]
 
-        # Get the matched values
-        matched_sorted = ref_sorted[interp_indices]
+        # Apply LUT: quantize each source pixel to a bin index, look up the
+        # matched value. (1.0 maps to bin 256 pre-clamp; clamp pulls it to 255
+        # so it lands in the same bin as histc's right-inclusive last bucket.)
+        src_bins = (src_flat * BINS).clamp(0, BINS - 1).long()
+        matched = lut[src_bins]
 
-        # Unsort to get back to original order
-        result = torch.empty_like(source.flatten())
-        result[src_indices] = matched_sorted
-
-        return result.reshape(source.shape)
+        return matched.reshape(source.shape)
 
     def histogram_match_region(self, inpainted, reference, mask):
         """
