@@ -1439,9 +1439,13 @@ class InpaintCropImproved:
             # Crop logic
             cur_x, cur_y, cur_w, cur_h = bx[0].item(), by[0].item(), bw[0].item(), bh[0].item()
 
-            # When both pad_to_max_size and output_resize_to_target_size are enabled,
-            # get natural-size crops first, then resize+pad later to preserve aspect ratios
-            if output_resize_to_target_size and not pad_to_max_size:
+            # When both pad_to_max_size and output_resize_to_target_size are enabled
+            # AND there is more than one crop in the batch, defer resizing to the
+            # post-loop block so aspect ratios are preserved before padding.
+            # For a single-crop batch, pad_to_max_size has nothing to pad against,
+            # so resize in-loop instead — otherwise output_resize_to_target_size
+            # would be silently ignored.
+            if output_resize_to_target_size and not (pad_to_max_size and batch_size > 1):
                 canvas_image, cto_x, cto_y, cto_w, cto_h, cropped_image, cropped_mask, ctc_x, ctc_y, ctc_w, ctc_h = processor.crop_magic_im(
                     sub_image, sub_mask, cur_x, cur_y, cur_w, cur_h, output_target_width, output_target_height, output_padding, downscale_algorithm, upscale_algorithm, resize_output=True
                 )
