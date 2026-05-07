@@ -785,6 +785,20 @@ class InpaintCropImproved:
         RETURN_NAMES = ("stitcher", "cropped_image", "cropped_mask")
  
     def inpaint_crop(self, image, downscale_algorithm, upscale_algorithm, preresize, preresize_mode, preresize_min_width, preresize_min_height, preresize_max_width, preresize_max_height, extend_for_outpainting, extend_up_factor, extend_down_factor, extend_left_factor, extend_right_factor, mask_hipass_filter, mask_fill_holes, mask_expand_pixels, mask_invert, mask_blend_pixels, context_from_mask_extend_factor, output_resize_to_target_size, output_target_width, output_target_height, output_padding, pad_to_max_size, uniform_scale, device_mode, mask=None, optional_context_mask=None):
+        # TEMPORARY DIAGNOSTIC — log inputs and final cropped output shape so
+        # the user-reported "did not resize to stated dimension" can be
+        # diagnosed against what the function is actually receiving.
+        _input_shape = tuple(image.shape)
+        _mask_batch = None if mask is None else mask.shape[0] if mask.ndim >= 3 else 1
+        print(f"[InpaintCrop DEBUG IN] image={_input_shape} mask_batch={_mask_batch} "
+              f"preresize={preresize} preresize_mode={preresize_mode!r} "
+              f"preresize_min=({preresize_min_width},{preresize_min_height}) "
+              f"preresize_max=({preresize_max_width},{preresize_max_height}) "
+              f"output_resize_to_target_size={output_resize_to_target_size} "
+              f"output_target=({output_target_width},{output_target_height}) "
+              f"output_padding={output_padding!r} pad_to_max_size={pad_to_max_size} "
+              f"uniform_scale={uniform_scale} device_mode={device_mode!r}", flush=True)
+
         image = image.clone()
         if mask is not None:
             mask = mask.clone()
@@ -1201,8 +1215,10 @@ class InpaintCropImproved:
                             else:
                                 final_debug_outputs.append(torch.zeros((count, 1, 1), device="cpu"))
             
+            print(f"[InpaintCrop DEBUG OUT] cropped_image={tuple(result_image.shape)} cropped_mask={tuple(result_mask.shape)}", flush=True)
             return (result_stitcher, result_image, result_mask, *final_debug_outputs)
         else:
+            print(f"[InpaintCrop DEBUG OUT] cropped_image={tuple(result_image.shape)} cropped_mask={tuple(result_mask.shape)}", flush=True)
             return (result_stitcher, result_image, result_mask)
 
 
