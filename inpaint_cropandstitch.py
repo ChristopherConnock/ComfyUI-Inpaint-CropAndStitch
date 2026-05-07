@@ -5,11 +5,6 @@ import nodes
 import numpy as np
 import os
 import torch
-
-# TEMPORARY DIAGNOSTIC — prints once at module import time to confirm WHICH
-# copy of this file ComfyUI is actually loading. Remove with the other
-# diagnostic prints once the accumulate report is resolved.
-print(f"[InpaintCropAndStitch DEBUG] module loaded from {__file__}", flush=True)
 import torch.nn.functional as TF
 import torchvision.transforms.functional as F
 from PIL import Image
@@ -785,20 +780,6 @@ class InpaintCropImproved:
         RETURN_NAMES = ("stitcher", "cropped_image", "cropped_mask")
  
     def inpaint_crop(self, image, downscale_algorithm, upscale_algorithm, preresize, preresize_mode, preresize_min_width, preresize_min_height, preresize_max_width, preresize_max_height, extend_for_outpainting, extend_up_factor, extend_down_factor, extend_left_factor, extend_right_factor, mask_hipass_filter, mask_fill_holes, mask_expand_pixels, mask_invert, mask_blend_pixels, context_from_mask_extend_factor, output_resize_to_target_size, output_target_width, output_target_height, output_padding, pad_to_max_size, uniform_scale, device_mode, mask=None, optional_context_mask=None):
-        # TEMPORARY DIAGNOSTIC — log inputs and final cropped output shape so
-        # the user-reported "did not resize to stated dimension" can be
-        # diagnosed against what the function is actually receiving.
-        _input_shape = tuple(image.shape)
-        _mask_batch = None if mask is None else mask.shape[0] if mask.ndim >= 3 else 1
-        print(f"[InpaintCrop DEBUG IN] image={_input_shape} mask_batch={_mask_batch} "
-              f"preresize={preresize} preresize_mode={preresize_mode!r} "
-              f"preresize_min=({preresize_min_width},{preresize_min_height}) "
-              f"preresize_max=({preresize_max_width},{preresize_max_height}) "
-              f"output_resize_to_target_size={output_resize_to_target_size} "
-              f"output_target=({output_target_width},{output_target_height}) "
-              f"output_padding={output_padding!r} pad_to_max_size={pad_to_max_size} "
-              f"uniform_scale={uniform_scale} device_mode={device_mode!r}", flush=True)
-
         image = image.clone()
         if mask is not None:
             mask = mask.clone()
@@ -1215,10 +1196,8 @@ class InpaintCropImproved:
                             else:
                                 final_debug_outputs.append(torch.zeros((count, 1, 1), device="cpu"))
             
-            print(f"[InpaintCrop DEBUG OUT] cropped_image={tuple(result_image.shape)} cropped_mask={tuple(result_mask.shape)}", flush=True)
             return (result_stitcher, result_image, result_mask, *final_debug_outputs)
         else:
-            print(f"[InpaintCrop DEBUG OUT] cropped_image={tuple(result_image.shape)} cropped_mask={tuple(result_mask.shape)}", flush=True)
             return (result_stitcher, result_image, result_mask)
 
 
@@ -1248,19 +1227,73 @@ class InpaintStitchImproved:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
 
+    # Accept lists so that when ComfyUI auto-iterates the upstream pipeline
+    # (one crop call per mask), this node still sees all stitcher dicts at
+    # once and can merge them under accumulate=True. Without this, accumulate
+    # has nothing to accumulate per call. The output stays a single value.
+    INPUT_IS_LIST = True
+    OUTPUT_IS_LIST = (False,)
+
     FUNCTION = "inpaint_stitch"
 
 
-    def inpaint_stitch(self, stitcher, inpainted_image, accumulate=False, color_match=True):
-        # TEMPORARY DIAGNOSTIC — remove once the "accumulate=True returns 3
-        # images" report is resolved. Logs exactly what the node is receiving
-        # so we can tell whether the bug is value-not-arriving vs. logic.
-        print(f"[InpaintStitch DEBUG] accumulate={accumulate!r} color_match={color_match!r} "
-              f"inpainted_batch={inpainted_image.shape[0]} "
-              f"stitcher_entries={len(stitcher.get('cropped_to_canvas_x', []))} "
-              f"pad_to_max_size={stitcher.get('pad_to_max_size', False)} "
-              f"device_mode={stitcher.get('device_mode', '?')}", flush=True)
+    # Stitcher dict keys whose values are per-crop lists (extended on each
+    # crop append). Used by the merge path below.
+    _STITCHER_LIST_KEYS = (
+        'canvas_to_orig_x', 'canvas_to_orig_y', 'canvas_to_orig_w', 'canvas_to_orig_h',
+        'canvas_image',
+        'cropped_to_canvas_x', 'cropped_to_canvas_y', 'cropped_to_canvas_w', 'cropped_to_canvas_h',
+        'cropped_mask_for_blend',
+    )
+    # Pad-mode-only list keys (only present when pad_to_max_size=True).
+    _STITCHER_PAD_LIST_KEYS = ('original_crop_h', 'original_crop_w')
 
+    def _merge_stitchers(self, stitcher_list):
+        """Concatenate per-crop lists across N stitcher dicts into one. Scalar
+        fields are taken from the first; all dicts are assumed to share the
+        same crop config (same source image, same pad/device settings)."""
+        merged = dict(stitcher_list[0])  # shallow copy seeds scalars
+        for key in self._STITCHER_LIST_KEYS:
+            merged[key] = []
+            for s in stitcher_list:
+                merged[key].extend(s[key])
+        if merged.get('pad_to_max_size', False):
+            for key in self._STITCHER_PAD_LIST_KEYS:
+                merged[key] = []
+                for s in stitcher_list:
+                    merged[key].extend(s.get(key, []))
+        return merged
+
+    def inpaint_stitch(self, stitcher, inpainted_image, accumulate=False, color_match=True):
+        # INPUT_IS_LIST=True means every input arrives wrapped in a list,
+        # even scalars. Unwrap booleans (always set once at the node level)
+        # and normalize stitcher / inpainted_image to lists we can iterate.
+        accumulate = accumulate[0] if isinstance(accumulate, list) else accumulate
+        color_match = color_match[0] if isinstance(color_match, list) else color_match
+        stitcher_list = stitcher if isinstance(stitcher, list) else [stitcher]
+        inpainted_list = inpainted_image if isinstance(inpainted_image, list) else [inpainted_image]
+
+        # Accumulate across N upstream invocations: merge the N stitcher dicts
+        # into one and concat the inpainted batches, then run the existing
+        # single-call accumulated path on the combined input.
+        if accumulate and len(stitcher_list) > 1:
+            merged_stitcher = self._merge_stitchers(stitcher_list)
+            merged_inpainted = torch.cat(inpainted_list, dim=0)
+            return self._stitch_one_call(merged_stitcher, merged_inpainted, accumulate=True, color_match=color_match)
+
+        # Single upstream invocation, or accumulate=False: run the existing
+        # logic per stitcher and concatenate the resulting full-canvas images
+        # into a single batched output.
+        if len(stitcher_list) == 1:
+            return self._stitch_one_call(stitcher_list[0], inpainted_list[0], accumulate=accumulate, color_match=color_match)
+
+        per_call_outputs = []
+        for s, im in zip(stitcher_list, inpainted_list):
+            (out,) = self._stitch_one_call(s, im, accumulate=accumulate, color_match=color_match)
+            per_call_outputs.append(out)
+        return (torch.cat(per_call_outputs, dim=0),)
+
+    def _stitch_one_call(self, stitcher, inpainted_image, accumulate=False, color_match=True):
         inpainted_image = inpainted_image.clone()
         results = []
 
