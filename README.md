@@ -99,9 +99,11 @@ Enable "resize to target size" and set it to a preferred resolution for your mod
 
 If you mask an area and you can still see the original image through the rendered image, it is **very likely** that your mask is not fully opaque. Even if it looks fully opaque - the human brain cannot tell a difference between many shades of grey. Please make sure that the mask is 100% opaque, e.g. take a screenshot, check pixel values for 255, 255, 255 or #FFFFFF. If you use mask fill holes, check that the entire boundary is 255, 255, 255 or #FFFFFF e.g. with the fuzzy select tool in Gimp with threshold 0.
 
-If you are running out of memory (likely you're processing very large videos), switch from GPU to CPU mode in the crop node - this will make both crop and stitch use CPU and RAM instead of VRAM.
+If the node is a bottleneck in your workflow (e.g. video inpainting), consider switching from CPU to GPU mode in the crop node, this will make both crop and stitch use GPU and VRAM instead of CPU and RAM, which will be 30x-100x faster - however, the inputs must fit in memory.
 
 # Changelog
+## 2026-05-25
+- Switched device default to CPU for compatibility.
 ## 2026-01-09
 - Huge performance improvement of 30x-100x by adding GPU support (new default is GPU, CPU is available as an option for fallback).
 - Clean up: Removed the long-deprecated old versions.

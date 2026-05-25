@@ -1190,7 +1190,7 @@ class InpaintCropImproved:
                 "output_padding": (["0", "8", "16", "32", "64", "128", "256", "512"], {"default": "32"}),
                 
                 # Device Mode
-                "device_mode": (["cpu (compatible)", "gpu (much faster)"], {"default": "gpu (much faster)"}),
+                "device_mode": (["cpu (compatible)", "gpu (much faster)"], {"default": "cpu (compatible)"}),
            },
            "optional": {
                 # Optional inputs
