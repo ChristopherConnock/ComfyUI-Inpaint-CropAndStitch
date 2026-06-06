@@ -53,7 +53,7 @@ Note: this video tutorial is for the previous version of the nodes, but still it
 - `output_padding`: Ensures that the cropped image width and height are a multiple of this padding value. Models require images to be padded to a certain value (8, 16, 32) to function properly.
 - `pad_to_max_size`: When processing multiple masks, makes every cropped output the same shape so they can be sampled as a batch. With `output_resize_to_target_size` off, pads each crop up to the largest natural crop size. With `output_resize_to_target_size` on, scales each crop to fit within the target (preserving aspect ratio) and pads the remainder. Pair with the Stitch node's `accumulate` to merge the regions back into one image.
 - `uniform_scale`: Only meaningful when `pad_to_max_size` and `output_resize_to_target_size` are both on. Applies the *same* scale factor to every crop (chosen to fit the largest crop within the target) so all inpainted regions sample at consistent detail. Off by default — each crop is independently scaled to maximize its own resolution.
-- `device_mode`: `cpu (compatible)` should always work but is slow, `gpu (much faster)` is much faster but may not work in all setups. Default is GPU given the performance improvements.
+- `device_mode`: `cpu (compatible)` should always work but is slow, `gpu (much faster)` is much faster but may not work in all setups. Default is CPU for compatibility; switch to GPU for a large speedup (30x-100x) if your setup supports it.
 
 ### Inpaint Stitch Parameters
 - `accumulate`: Combines all inpainted regions into a single output image. Use when you have multiple masks for different regions of the same image and want them merged into one result. Without it, each region is stitched into its own output frame.
@@ -107,7 +107,38 @@ If you mask an area and you can still see the original image through the rendere
 
 If the node is a bottleneck in your workflow (e.g. video inpainting), consider switching from CPU to GPU mode in the crop node, this will make both crop and stitch use GPU and VRAM instead of CPU and RAM, which will be 30x-100x faster - however, the inputs must fit in memory.
 
+# Usage Notes (this fork)
+
+### Inpainting multiple regions of one image into a single result
+To inpaint several masked regions of the same image and get one combined output:
+1. On **Inpaint Crop**, enable `pad_to_max_size` so every region is cropped to the same shape and can be sampled together as a batch. If you also use `output_resize_to_target_size`, turn on `uniform_scale` when you want every region sampled at the same scale (otherwise each region is independently scaled to maximize its own detail).
+2. On **Inpaint Stitch**, enable `accumulate` to merge all regions back into one image. Leave `color_match` on (the default) so each region's colors blend naturally with their surroundings.
+
+This works whether the masks arrive as a single batched tensor or as separate (non-batched) connections that ComfyUI auto-iterates — running the crop/sample/stitch pipeline once per mask. The Stitch node merges the per-pass results internally, so `accumulate` produces a single image either way. With `accumulate` off, the per-pass results are concatenated into one batched image so downstream batching keeps working.
+
+### Debug / stage-inspection outputs
+Set the environment variable `INPAINT_CROPANDSTITCH_DEBUG=1` before launching ComfyUI to expose a set of extra `DEBUG_*` image and mask outputs on the Inpaint Crop node. These surface the intermediate result of each processing stage (preresize, fill holes, expand, invert, blur, hipass filter, context selection, canvas placement, blend mask, etc.) and are useful for diagnosing an unexpected crop or mask. Leave the variable unset for normal use, in which case the node exposes only `stitcher`, `cropped_image`, and `cropped_mask`.
+
 # Changelog
+## Fork changes (ChristopherConnock)
+This is a fork of [lquesada/ComfyUI-Inpaint-CropAndStitch](https://github.com/lquesada/ComfyUI-Inpaint-CropAndStitch). The entries in this section are the changes made in this fork on top of upstream; the dated entries below are upstream's original changelog.
+
+### 2026-05-07
+- Inpaint Stitch now accepts list inputs and merges auto-iterated runs. When upstream nodes produce several masks as separate (non-batched) connections, ComfyUI runs the whole crop/sample/stitch pipeline once per mask, so Stitch previously saw one region per call and `accumulate=True` returned N images instead of one. Stitch now declares its inputs as lists and merges the per-call stitchers before running the accumulate path, so all regions land in a single image; with `accumulate=False` the per-call results are concatenated into one batched image so downstream batching still works. (See Usage Notes.)
+- Added `.claude/` to `.gitignore`.
+
+### 2026-05-06
+- Performance: rewrote color/histogram matching to use a lookup table (LUT) and hoisted `.cpu()` transfers out of the GPU rescale loops, cutting host/device round-trips.
+- Refactor: consolidated the duplicated CPU and GPU processor methods into the shared `ProcessorLogic` base class and removed dead code and assert antipatterns. No behavioral change.
+- Debug outputs are now opt-in via the `INPAINT_CROPANDSTITCH_DEBUG=1` environment variable. When unset, Inpaint Crop exposes only its standard outputs; when set, it exposes a set of `DEBUG_*` stage-inspection outputs. (See Usage Notes.)
+- Fix: `output_resize_to_target_size` was ignored for single-mask runs when `pad_to_max_size` was enabled.
+
+### 2026-02-12
+- Added `pad_to_max_size` and `uniform_scale` to Inpaint Crop and `color_match` to Inpaint Stitch, enabling multiple masked regions of one image to be cropped to a common shape, sampled as a single batch, and merged back together. (See the parameter docs and Usage Notes above.)
+
+### 2026-01-25
+- Added the `accumulate` option to Inpaint Stitch: merge multiple inpainted regions (from multiple masks on the same image) into a single output image instead of one frame per region.
+
 ## 2026-05-25
 - Switched device default to CPU for compatibility.
 ## 2026-01-09
