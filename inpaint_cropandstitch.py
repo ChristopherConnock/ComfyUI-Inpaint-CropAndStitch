@@ -705,7 +705,7 @@ class InpaintCropImproved:
                 "uniform_scale": ("BOOLEAN", {"default": False, "tooltip": "When enabled with pad_to_max_size and output_resize_to_target_size: applies the same scale factor to all crops (based on the largest crop). This ensures consistent detail levels across all inpainted regions. Without this, each crop is independently scaled to maximize its resolution."}),
 
                 # Device Mode
-                "device_mode": (["cpu (compatible)", "gpu (much faster)"], {"default": "gpu (much faster)"}),
+                "device_mode": (["cpu (compatible)", "gpu (much faster)"], {"default": "cpu (compatible)"}),
            },
            "optional": {
                 # Optional inputs
