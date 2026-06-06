@@ -128,7 +128,7 @@ const findWidgetByName = (node, name) => {
 function toggleWidget(node, widget, show = false, suffix = "") {
     if (!widget) return;
     widget.disabled = !show
-    widget.linkedWidgets?.forEach(w => toggleWidget(node, w, ":" + widget.name, show));
+    widget.linkedWidgets?.forEach(w => toggleWidget(node, w, show, ":" + widget.name));
 }   
 
 app.registerExtension({

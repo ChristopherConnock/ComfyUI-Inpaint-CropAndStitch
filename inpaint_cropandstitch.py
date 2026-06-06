@@ -1278,6 +1278,18 @@ class InpaintStitchImproved:
         # single-call accumulated path on the combined input.
         if accumulate and len(stitcher_list) > 1:
             merged_stitcher = self._merge_stitchers(stitcher_list)
+            # The per-mask inpainted images must share H/W/C to be batched. When
+            # masks are auto-iterated (one crop call each), pad_to_max_size does
+            # not engage, so the only way they all match is a fixed target size.
+            distinct_shapes = {tuple(im.shape[1:]) for im in inpainted_list}
+            if len(distinct_shapes) > 1:
+                raise ValueError(
+                    "Inpaint Stitch (accumulate): the inpainted regions have different "
+                    f"sizes {sorted(distinct_shapes)} and cannot be combined. When masks "
+                    "are processed one at a time (ComfyUI auto-iteration), enable "
+                    "'output_resize_to_target_size' on the Inpaint Crop node so every "
+                    "region is sampled at the same resolution."
+                )
             merged_inpainted = torch.cat(inpainted_list, dim=0)
             return self._stitch_one_call(merged_stitcher, merged_inpainted, accumulate=True, color_match=color_match)
 
@@ -1498,15 +1510,18 @@ class InpaintStitchImproved:
             if pad_to_max_size and 'original_crop_h' in stitcher:
                 mask = mask[:, :orig_crop_h, :orig_crop_w]
 
-            # Verify original-image anchor and size are consistent across all
-            # stitcher entries — accumulate composes onto a single accumulator
-            # extracted from the first canvas, so any divergence here would
-            # paste pixels at the wrong offset.
-            if (item_cto_w != cto_w or item_cto_h != cto_h
-                    or item_cto_x != cto_x or item_cto_y != cto_y):
-                print(f"InpaintStitchImproved: Warning - inconsistent original anchor at index {idx}. "
-                      f"Expected x={cto_x} y={cto_y} w={cto_w} h={cto_h}, "
-                      f"got x={item_cto_x} y={item_cto_y} w={item_cto_w} h={item_cto_h}. "
+            # The accumulator is a single buffer the size of the original image
+            # (cto_w x cto_h) shared by every region. Each region maps its own
+            # canvas into original-image space via its own item_cto_x/y below,
+            # so a differing offset (e.g. an edge-adjacent mask whose context
+            # needed canvas padding, giving cto_x/cto_y != 0) still composes at
+            # the correct place. Only the original-image DIMENSIONS have to
+            # agree; if they differ the regions came from differently-sized
+            # sources and cannot share one accumulator.
+            if item_cto_w != cto_w or item_cto_h != cto_h:
+                print(f"InpaintStitchImproved: Warning - region {idx} reports original-image "
+                      f"size {item_cto_w}x{item_cto_h}, expected {cto_w}x{cto_h}. "
+                      f"Regions must come from the same source image to accumulate. "
                       f"Skipping this region.")
                 continue
 
