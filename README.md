@@ -116,12 +116,19 @@ To inpaint several masked regions of the same image and get one combined output:
 
 This works whether the masks arrive as a single batched tensor or as separate (non-batched) connections that ComfyUI auto-iterates — running the crop/sample/stitch pipeline once per mask. The Stitch node merges the per-pass results internally, so `accumulate` produces a single image either way. With `accumulate` off, the per-pass results are concatenated into one batched image so downstream batching keeps working.
 
+All regions being accumulated must come from the **same source image** (same dimensions) — `accumulate` composes them into one buffer the size of that image. Masks may sit anywhere, including against the image border. When masks are auto-iterated one at a time, enable `output_resize_to_target_size` so every region is sampled at the same resolution (the per-pass crops can't be padded to a common size in that mode); otherwise Stitch will report that the regions have different sizes.
+
 ### Debug / stage-inspection outputs
 Set the environment variable `INPAINT_CROPANDSTITCH_DEBUG=1` before launching ComfyUI to expose a set of extra `DEBUG_*` image and mask outputs on the Inpaint Crop node. These surface the intermediate result of each processing stage (preresize, fill holes, expand, invert, blur, hipass filter, context selection, canvas placement, blend mask, etc.) and are useful for diagnosing an unexpected crop or mask. Leave the variable unset for normal use, in which case the node exposes only `stitcher`, `cropped_image`, and `cropped_mask`.
 
 # Changelog
 ## Fork changes (ChristopherConnock)
 This is a fork of [lquesada/ComfyUI-Inpaint-CropAndStitch](https://github.com/lquesada/ComfyUI-Inpaint-CropAndStitch). The entries in this section are the changes made in this fork on top of upstream; the dated entries below are upstream's original changelog.
+
+### 2026-06-06
+- Fix: Inpaint Stitch `accumulate` mode silently dropped any masked region whose context area reached the image border. The merge step only required that all regions share the same source-image size; it was also requiring identical canvas-padding offsets, which differ for edge-adjacent masks, so those regions were skipped (with only a console warning). Edge regions now compose correctly.
+- Robustness: Inpaint Stitch `accumulate` now raises a clear error when the per-mask inpainted images have different sizes (instead of an opaque tensor-concatenation error), pointing you at `output_resize_to_target_size`. Note: regions still have to come from the same-size source image to be accumulated into one result.
+- Fix: corrected a swapped-argument bug in the web widget toggling helper (`js/showcontrol.js`) so linked widgets follow their parent's visibility.
 
 ### 2026-05-07
 - Inpaint Stitch now accepts list inputs and merges auto-iterated runs. When upstream nodes produce several masks as separate (non-batched) connections, ComfyUI runs the whole crop/sample/stitch pipeline once per mask, so Stitch previously saw one region per call and `accumulate=True` returned N images instead of one. Stitch now declares its inputs as lists and merges the per-call stitchers before running the accumulate path, so all regions land in a single image; with `accumulate=False` the per-call results are concatenated into one batched image so downstream batching still works. (See Usage Notes.)
