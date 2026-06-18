@@ -1314,6 +1314,32 @@ class InpaintStitchImproved:
         # runs.
         stitcher = dict(stitcher)
 
+        # Reconcile the inpainted image's channel count with the canvas/original.
+        # Some external inpaint sources (e.g. Gemini and other API image nodes)
+        # hand back RGBA when the original was RGB. Every downstream blend
+        # broadcasts the mask over channels and does mask*inpainted + (1-mask)*canvas,
+        # which fails ("tensor a (4) must match tensor b (3)") when the channel
+        # counts differ; histogram color-matching likewise iterates channels
+        # against the original. The canvas is the source of truth for how many
+        # channels the output should have, so match the inpainted image to it.
+        canvas_list = stitcher.get('canvas_image')
+        if canvas_list and torch.is_tensor(canvas_list[0]):
+            target_c = canvas_list[0].shape[-1]
+            src_c = inpainted_image.shape[-1]
+            if src_c > target_c:
+                # Drop extra channels (typically a superfluous alpha channel).
+                inpainted_image = inpainted_image[..., :target_c]
+            elif src_c < target_c:
+                # Inpaint has fewer channels than the canvas (e.g. RGB into an
+                # RGBA original): pad with opaque 1.0 so the masked region stays
+                # fully opaque rather than erroring.
+                pad = torch.ones(
+                    (*inpainted_image.shape[:-1], target_c - src_c),
+                    device=inpainted_image.device,
+                    dtype=inpainted_image.dtype,
+                )
+                inpainted_image = torch.cat([inpainted_image, pad], dim=-1)
+
         device_mode = stitcher.get('device_mode', 'cpu (compatible)')
 
         if device_mode == "gpu (much faster)":

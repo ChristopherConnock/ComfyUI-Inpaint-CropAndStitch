@@ -118,12 +118,18 @@ This works whether the masks arrive as a single batched tensor or as separate (n
 
 All regions being accumulated must come from the **same source image** (same dimensions) — `accumulate` composes them into one buffer the size of that image. Masks may sit anywhere, including against the image border. When masks are auto-iterated one at a time, enable `output_resize_to_target_size` so every region is sampled at the same resolution (the per-pass crops can't be padded to a common size in that mode); otherwise Stitch will report that the regions have different sizes.
 
+### Using external API image nodes (Gemini, etc.) as the inpaint sampler
+You can feed the cropped image to an external image-generation API node (for example a Gemini image node) and route its result back into **Inpaint Stitch** instead of a local sampler. Some of these nodes return an RGBA (4-channel) image even when the original photo is RGB (3-channel). Stitch reconciles the channel counts automatically — an extra alpha channel is dropped (and a missing one is padded opaque) so the result matches the original image — so no manual conversion node is needed. The stitched output always keeps the original image's channel layout.
+
 ### Debug / stage-inspection outputs
 Set the environment variable `INPAINT_CROPANDSTITCH_DEBUG=1` before launching ComfyUI to expose a set of extra `DEBUG_*` image and mask outputs on the Inpaint Crop node. These surface the intermediate result of each processing stage (preresize, fill holes, expand, invert, blur, hipass filter, context selection, canvas placement, blend mask, etc.) and are useful for diagnosing an unexpected crop or mask. Leave the variable unset for normal use, in which case the node exposes only `stitcher`, `cropped_image`, and `cropped_mask`.
 
 # Changelog
 ## Fork changes (ChristopherConnock)
 This is a fork of [lquesada/ComfyUI-Inpaint-CropAndStitch](https://github.com/lquesada/ComfyUI-Inpaint-CropAndStitch). The entries in this section are the changes made in this fork on top of upstream; the dated entries below are upstream's original changelog.
+
+### 2026-06-18
+- Fix: Inpaint Stitch crashed with `RuntimeError: The size of tensor a (4) must match the size of tensor b (3) at non-singleton dimension 3` when the inpainted image had a different channel count than the original (e.g. an RGBA image returned by an external API node such as Gemini, stitched back into an RGB photo). Stitch now reconciles the inpainted image to the canvas's channel count once, before blending — dropping an extra alpha channel (or padding a missing one with opaque) — which covers the normal, `accumulate`, and `color_match` paths. (See Usage Notes.)
 
 ### 2026-06-06
 - Fix: Inpaint Stitch `accumulate` mode silently dropped any masked region whose context area reached the image border. The merge step only required that all regions share the same source-image size; it was also requiring identical canvas-padding offsets, which differ for edge-adjacent masks, so those regions were skipped (with only a console warning). Edge regions now compose correctly.
